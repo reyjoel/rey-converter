@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:printing/printing.dart';
 
+import 'document_page.dart';
 import 'ordering.dart';
 import 'pdf_service.dart';
 
@@ -20,7 +21,7 @@ class ConverterPage extends StatefulWidget {
 class _ConverterPageState extends State<ConverterPage> {
   final _picker = ImagePicker();
   final _pdfService = PdfService();
-  final List<XFile> _images = [];
+  final List<DocumentPage> _pages = [];
 
   PdfImageQuality _quality = PdfImageQuality.balanced;
   Uint8List? _generatedPdf;
@@ -33,7 +34,7 @@ class _ConverterPageState extends State<ConverterPage> {
       final picked = await _picker.pickMultiImage();
       if (picked.isEmpty || !mounted) return;
       setState(() {
-        _images.addAll(picked);
+        _pages.addAll(picked.map((image) => DocumentPage(source: image)));
         _generatedPdf = null;
       });
     } catch (error) {
@@ -41,10 +42,94 @@ class _ConverterPageState extends State<ConverterPage> {
     }
   }
 
+  Future<void> _scanPages() async {
+    var captureAnother = true;
+    while (captureAnother && mounted) {
+      try {
+        final captured = await _picker.pickImage(
+          source: ImageSource.camera,
+          imageQuality: 100,
+        );
+        if (captured == null || !mounted) return;
+        setState(() {
+          _pages.add(DocumentPage(source: captured));
+          _generatedPdf = null;
+        });
+        captureAnother =
+            await showDialog<bool>(
+              context: context,
+              builder: (dialogContext) => AlertDialog(
+                title: const Text('Page captured'),
+                content: const Text(
+                  'Capture another page or return to arrange and edit your pages.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(false),
+                    child: const Text('Done'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: () => Navigator.of(dialogContext).pop(true),
+                    icon: const Icon(Icons.document_scanner_outlined),
+                    label: const Text('Capture another'),
+                  ),
+                ],
+              ),
+            ) ??
+            false;
+      } catch (error) {
+        _showError('A page could not be captured: $error');
+        return;
+      }
+    }
+  }
+
+  Future<void> _showAddPages() async {
+    final source = await showModalBottomSheet<_PageSource>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('Add pages', style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 12),
+              ListTile(
+                leading: const Icon(Icons.document_scanner_outlined),
+                title: const Text('Scan with camera'),
+                subtitle: const Text('Capture one or more paper pages'),
+                onTap: () => Navigator.of(sheetContext).pop(_PageSource.camera),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('Choose from gallery'),
+                subtitle: const Text('Select several images at once'),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(_PageSource.gallery),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted) return;
+    switch (source) {
+      case _PageSource.camera:
+        await _scanPages();
+      case _PageSource.gallery:
+        await _selectImages();
+      case null:
+        return;
+    }
+  }
+
   void _reorder(int oldIndex, int newIndex) {
     setState(() {
-      final reordered = moveItem(_images, oldIndex, newIndex);
-      _images
+      final reordered = moveItem(_pages, oldIndex, newIndex);
+      _pages
         ..clear()
         ..addAll(reordered);
       _generatedPdf = null;
@@ -53,13 +138,25 @@ class _ConverterPageState extends State<ConverterPage> {
 
   void _remove(int index) {
     setState(() {
-      _images.removeAt(index);
+      _pages.removeAt(index);
+      _generatedPdf = null;
+    });
+  }
+
+  Future<void> _editPage(int index) async {
+    final edited = await showDialog<DocumentPage>(
+      context: context,
+      builder: (_) => _PageEditorDialog(page: _pages[index]),
+    );
+    if (edited == null || !mounted) return;
+    setState(() {
+      _pages[index] = edited;
       _generatedPdf = null;
     });
   }
 
   Future<void> _createPdf() async {
-    if (_images.isEmpty || _isGenerating) return;
+    if (_pages.isEmpty || _isGenerating) return;
     final name = await _askForFilename();
     if (name == null || !mounted) return;
 
@@ -71,7 +168,7 @@ class _ConverterPageState extends State<ConverterPage> {
 
     try {
       final bytes = await _pdfService.createPdf(
-        images: List<XFile>.of(_images),
+        pages: List<DocumentPage>.of(_pages),
         quality: _quality,
         onProgress: (completed, _) {
           if (mounted) setState(() => _completedPages = completed);
@@ -79,7 +176,7 @@ class _ConverterPageState extends State<ConverterPage> {
       );
       if (!mounted) return;
       setState(() => _generatedPdf = bytes);
-      _showStatusPopup('${_images.length}-page PDF is ready.', isError: false);
+      _showStatusPopup('${_pages.length}-page PDF is ready.', isError: false);
     } catch (error) {
       _showError('The PDF could not be created: $error');
     } finally {
@@ -164,13 +261,13 @@ class _ConverterPageState extends State<ConverterPage> {
       appBar: AppBar(
         title: const Text('REY Converter'),
         actions: [
-          if (_images.isNotEmpty)
+          if (_pages.isNotEmpty)
             IconButton(
               tooltip: 'Clear all',
               onPressed: _isGenerating
                   ? null
                   : () => setState(() {
-                      _images.clear();
+                      _pages.clear();
                       _generatedPdf = null;
                     }),
               icon: const Icon(Icons.delete_sweep_outlined),
@@ -187,9 +284,9 @@ class _ConverterPageState extends State<ConverterPage> {
           children: [
             _buildIntro(),
             Expanded(
-              child: _images.isEmpty ? _buildEmptyState() : _buildImageList(),
+              child: _pages.isEmpty ? _buildEmptyState() : _buildImageList(),
             ),
-            if (_images.isNotEmpty) _buildBottomPanel(),
+            if (_pages.isNotEmpty) _buildBottomPanel(),
           ],
         ),
       ),
@@ -282,9 +379,15 @@ class _ConverterPageState extends State<ConverterPage> {
             ),
             const SizedBox(height: 24),
             FilledButton.icon(
+              onPressed: _scanPages,
+              icon: const Icon(Icons.document_scanner_outlined),
+              label: const Text('Scan document'),
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
               onPressed: _selectImages,
-              icon: const Icon(Icons.add_photo_alternate_outlined),
-              label: const Text('Choose images'),
+              icon: const Icon(Icons.photo_library_outlined),
+              label: const Text('Choose from gallery'),
             ),
           ],
         ),
@@ -296,7 +399,7 @@ class _ConverterPageState extends State<ConverterPage> {
     return ReorderableListView.builder(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 100),
       buildDefaultDragHandles: false,
-      itemCount: _images.length,
+      itemCount: _pages.length,
       onReorderItem: _isGenerating ? (_, _) {} : _reorder,
       proxyDecorator: (child, _, animation) => Material(
         elevation: 6 * animation.value,
@@ -304,9 +407,9 @@ class _ConverterPageState extends State<ConverterPage> {
         child: child,
       ),
       itemBuilder: (context, index) {
-        final image = _images[index];
+        final page = _pages[index];
         return Card(
-          key: ValueKey(image),
+          key: ValueKey(page.id),
           clipBehavior: Clip.antiAlias,
           child: ListTile(
             contentPadding: const EdgeInsets.symmetric(
@@ -318,20 +421,7 @@ class _ConverterPageState extends State<ConverterPage> {
               children: [
                 ClipRRect(
                   borderRadius: BorderRadius.circular(10),
-                  child: Image.file(
-                    File(image.path),
-                    width: 64,
-                    height: 64,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) => Container(
-                      width: 64,
-                      height: 64,
-                      color: Theme.of(context)
-                          .colorScheme
-                          .surfaceContainerHighest,
-                      child: const Icon(Icons.image_not_supported_outlined),
-                    ),
-                  ),
+                  child: _EditedImagePreview(page: page, width: 64, height: 64),
                 ),
                 Positioned(
                   left: -6,
@@ -352,10 +442,19 @@ class _ConverterPageState extends State<ConverterPage> {
               ],
             ),
             title: Text('Page ${index + 1}'),
-            subtitle: const Text('Hold and drag to reorder'),
+            subtitle: Text(
+              page.filter == ScanFilter.original
+                  ? 'Hold and drag to reorder'
+                  : page.filter.label,
+            ),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                IconButton(
+                  tooltip: 'Edit page ${index + 1}',
+                  onPressed: _isGenerating ? null : () => _editPage(index),
+                  icon: const Icon(Icons.tune),
+                ),
                 IconButton(
                   tooltip: 'Remove page ${index + 1}',
                   onPressed: _isGenerating ? null : () => _remove(index),
@@ -390,9 +489,9 @@ class _ConverterPageState extends State<ConverterPage> {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: _isGenerating ? null : _selectImages,
-                    icon: const Icon(Icons.add_photo_alternate_outlined),
-                    label: const Text('Add images'),
+                    onPressed: _isGenerating ? null : _showAddPages,
+                    icon: const Icon(Icons.add_outlined),
+                    label: const Text('Add pages'),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -421,16 +520,16 @@ class _ConverterPageState extends State<ConverterPage> {
             ),
             const SizedBox(height: 10),
             if (_isGenerating) ...[
-              LinearProgressIndicator(value: _completedPages / _images.length),
+              LinearProgressIndicator(value: _completedPages / _pages.length),
               const SizedBox(height: 8),
-              Text('Creating page $_completedPages of ${_images.length}…'),
+              Text('Creating page $_completedPages of ${_pages.length}…'),
             ] else if (_generatedPdf == null)
               SizedBox(
                 width: double.infinity,
                 child: FilledButton.icon(
                   onPressed: _createPdf,
                   icon: const Icon(Icons.picture_as_pdf_outlined),
-                  label: Text('Create ${_images.length}-page PDF'),
+                  label: Text('Create ${_pages.length}-page PDF'),
                 ),
               )
             else
@@ -456,6 +555,200 @@ class _ConverterPageState extends State<ConverterPage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+enum _PageSource { camera, gallery }
+
+class _EditedImagePreview extends StatelessWidget {
+  const _EditedImagePreview({
+    required this.page,
+    required this.width,
+    required this.height,
+  });
+
+  final DocumentPage page;
+  final double width;
+  final double height;
+
+  static const _grayscaleMatrix = <double>[
+    0.2126,
+    0.7152,
+    0.0722,
+    0,
+    0,
+    0.2126,
+    0.7152,
+    0.0722,
+    0,
+    0,
+    0.2126,
+    0.7152,
+    0.0722,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+  ];
+  static const _highContrastMatrix = <double>[
+    0.3827,
+    1.2874,
+    0.1299,
+    0,
+    -102,
+    0.3827,
+    1.2874,
+    0.1299,
+    0,
+    -102,
+    0.3827,
+    1.2874,
+    0.1299,
+    0,
+    -102,
+    0,
+    0,
+    0,
+    1,
+    0,
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    Widget image = Image.file(
+      File(page.source.path),
+      width: width,
+      height: height,
+      fit: BoxFit.cover,
+      errorBuilder: (_, _, _) => Container(
+        width: width,
+        height: height,
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        child: const Icon(Icons.image_not_supported_outlined),
+      ),
+    );
+    final matrix = switch (page.filter) {
+      ScanFilter.original => null,
+      ScanFilter.grayscale => _grayscaleMatrix,
+      ScanFilter.highContrast => _highContrastMatrix,
+    };
+    if (matrix != null) {
+      image = ColorFiltered(
+        colorFilter: ColorFilter.matrix(matrix),
+        child: image,
+      );
+    }
+    return SizedBox(
+      width: width,
+      height: height,
+      child: ClipRect(
+        child: RotatedBox(quarterTurns: page.quarterTurns, child: image),
+      ),
+    );
+  }
+}
+
+class _PageEditorDialog extends StatefulWidget {
+  const _PageEditorDialog({required this.page});
+
+  final DocumentPage page;
+
+  @override
+  State<_PageEditorDialog> createState() => _PageEditorDialogState();
+}
+
+class _PageEditorDialogState extends State<_PageEditorDialog> {
+  late DocumentPage _edited;
+
+  @override
+  void initState() {
+    super.initState();
+    _edited = widget.page;
+  }
+
+  void _rotate(int amount) {
+    setState(() {
+      _edited = _edited.copyWith(
+        quarterTurns: (_edited.quarterTurns + amount + 4) % 4,
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Edit page'),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: _EditedImagePreview(
+                page: _edited,
+                width: 420,
+                height: 260,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton.filledTonal(
+                  tooltip: 'Rotate left',
+                  onPressed: () => _rotate(-1),
+                  icon: const Icon(Icons.rotate_left),
+                ),
+                const SizedBox(width: 20),
+                IconButton.filledTonal(
+                  tooltip: 'Rotate right',
+                  onPressed: () => _rotate(1),
+                  icon: const Icon(Icons.rotate_right),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Document filter',
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 8,
+              children: ScanFilter.values
+                  .map(
+                    (filter) => ChoiceChip(
+                      label: Text(filter.label),
+                      selected: _edited.filter == filter,
+                      onSelected: (_) => setState(
+                        () => _edited = _edited.copyWith(filter: filter),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_edited),
+          child: const Text('Apply'),
+        ),
+      ],
     );
   }
 }

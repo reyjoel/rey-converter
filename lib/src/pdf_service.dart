@@ -1,9 +1,10 @@
 import 'dart:typed_data';
 
 import 'package:image/image.dart' as img;
-import 'package:image_picker/image_picker.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
+
+import 'document_page.dart';
 
 enum PdfImageQuality {
   compact('Compact', 1280, 70),
@@ -19,7 +20,7 @@ enum PdfImageQuality {
 
 class PdfService {
   Future<Uint8List> createPdf({
-    required List<XFile> images,
+    required List<DocumentPage> pages,
     required PdfImageQuality quality,
     void Function(int completed, int total)? onProgress,
   }) async {
@@ -29,9 +30,13 @@ class PdfService {
       compress: true,
     );
 
-    for (var index = 0; index < images.length; index++) {
-      final originalBytes = await images[index].readAsBytes();
-      final preparedBytes = _prepareImage(originalBytes, quality);
+    for (var index = 0; index < pages.length; index++) {
+      final originalBytes = await pages[index].source.readAsBytes();
+      final preparedBytes = preparePageImage(
+        originalBytes,
+        pages[index],
+        quality,
+      );
       final pdfImage = pw.MemoryImage(preparedBytes);
 
       document.addPage(
@@ -42,13 +47,17 @@ class PdfService {
               pw.Center(child: pw.Image(pdfImage, fit: pw.BoxFit.contain)),
         ),
       );
-      onProgress?.call(index + 1, images.length);
+      onProgress?.call(index + 1, pages.length);
     }
 
     return document.save();
   }
 
-  Uint8List _prepareImage(Uint8List bytes, PdfImageQuality quality) {
+  Uint8List preparePageImage(
+    Uint8List bytes,
+    DocumentPage page,
+    PdfImageQuality quality,
+  ) {
     final decoded = img.decodeImage(bytes);
     if (decoded == null) {
       throw const FormatException(
@@ -57,21 +66,34 @@ class PdfService {
     }
 
     final corrected = img.bakeOrientation(decoded);
-    final longestSide = corrected.width > corrected.height
-        ? corrected.width
-        : corrected.height;
+    var edited = corrected;
+    if (page.quarterTurns != 0) {
+      edited = img.copyRotate(edited, angle: page.quarterTurns * 90);
+    }
+    edited = switch (page.filter) {
+      ScanFilter.original => edited,
+      ScanFilter.grayscale => img.grayscale(edited),
+      ScanFilter.highContrast => img.adjustColor(
+        img.grayscale(edited),
+        contrast: 1.45,
+      ),
+    };
+
+    final longestSide = edited.width > edited.height
+        ? edited.width
+        : edited.height;
     final resized = longestSide > quality.maximumDimension
         ? img.copyResize(
-            corrected,
-            width: corrected.width >= corrected.height
+            edited,
+            width: edited.width >= edited.height
                 ? quality.maximumDimension
                 : null,
-            height: corrected.height > corrected.width
+            height: edited.height > edited.width
                 ? quality.maximumDimension
                 : null,
             interpolation: img.Interpolation.linear,
           )
-        : corrected;
+        : edited;
 
     return Uint8List.fromList(
       img.encodeJpg(resized, quality: quality.jpegQuality),
