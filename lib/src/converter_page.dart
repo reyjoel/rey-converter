@@ -1,14 +1,17 @@
-import 'dart:io';
 import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:printing/printing.dart';
 
 import 'document_page.dart';
 import 'ordering.dart';
+import 'document_preview.dart';
+import 'page_editor.dart';
 import 'pdf_service.dart';
 
 class ConverterPage extends StatefulWidget {
@@ -27,60 +30,104 @@ class _ConverterPageState extends State<ConverterPage> {
   Uint8List? _generatedPdf;
   String _pdfName = 'images.pdf';
   bool _isGenerating = false;
+  bool _isPicking = false;
   int _completedPages = 0;
 
+  bool get _isBusy => _isGenerating || _isPicking;
+
+  @override
+  void initState() {
+    super.initState();
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      _isPicking = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_recoverLostImages());
+      });
+    }
+  }
+
+  Future<void> _recoverLostImages() async {
+    try {
+      final response = await _picker.retrieveLostData();
+      if (!mounted || response.isEmpty) return;
+      final files = response.files;
+      if (files != null && files.isNotEmpty) {
+        _addImages(files);
+      }
+      if (response.exception != null) {
+        _showError('Images could not be recovered: ${response.exception}');
+      }
+    } catch (error) {
+      _showError('Images could not be recovered: $error');
+    } finally {
+      if (mounted) setState(() => _isPicking = false);
+    }
+  }
+
+  void _addImages(Iterable<XFile> images) {
+    if (!mounted) return;
+    setState(() {
+      _pages.addAll(images.map((image) => DocumentPage(source: image)));
+      _generatedPdf = null;
+    });
+  }
+
   Future<void> _selectImages() async {
+    if (_isBusy) return;
+    setState(() => _isPicking = true);
     try {
       final picked = await _picker.pickMultiImage();
       if (picked.isEmpty || !mounted) return;
-      setState(() {
-        _pages.addAll(picked.map((image) => DocumentPage(source: image)));
-        _generatedPdf = null;
-      });
+      _addImages(picked);
     } catch (error) {
       _showError('Images could not be opened: $error');
+    } finally {
+      if (mounted) setState(() => _isPicking = false);
     }
   }
 
   Future<void> _scanPages() async {
-    var captureAnother = true;
-    while (captureAnother && mounted) {
-      try {
-        final captured = await _picker.pickImage(
-          source: ImageSource.camera,
-          imageQuality: 100,
-        );
-        if (captured == null || !mounted) return;
-        setState(() {
-          _pages.add(DocumentPage(source: captured));
-          _generatedPdf = null;
-        });
-        captureAnother =
-            await showDialog<bool>(
-              context: context,
-              builder: (dialogContext) => AlertDialog(
-                title: const Text('Page captured'),
-                content: const Text(
-                  'Capture another page or return to arrange and edit your pages.',
+    if (_isBusy) return;
+    setState(() => _isPicking = true);
+    try {
+      var captureAnother = true;
+      while (captureAnother && mounted) {
+        try {
+          final captured = await _picker.pickImage(
+            source: ImageSource.camera,
+            imageQuality: 100,
+          );
+          if (captured == null || !mounted) return;
+          _addImages([captured]);
+          captureAnother =
+              await showDialog<bool>(
+                context: context,
+                builder: (dialogContext) => AlertDialog(
+                  title: const Text('Page captured'),
+                  content: const Text(
+                    'Capture another page or return to arrange and edit your pages.',
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(false),
+                      child: const Text('Done'),
+                    ),
+                    FilledButton.icon(
+                      onPressed: () => Navigator.of(dialogContext).pop(true),
+                      icon: const Icon(Icons.document_scanner_outlined),
+                      label: const Text('Capture another'),
+                    ),
+                  ],
                 ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(dialogContext).pop(false),
-                    child: const Text('Done'),
-                  ),
-                  FilledButton.icon(
-                    onPressed: () => Navigator.of(dialogContext).pop(true),
-                    icon: const Icon(Icons.document_scanner_outlined),
-                    label: const Text('Capture another'),
-                  ),
-                ],
-              ),
-            ) ??
-            false;
-      } catch (error) {
-        _showError('A page could not be captured: $error');
-        return;
+              ) ??
+              false;
+        } catch (error) {
+          _showError('A page could not be captured: $error');
+          return;
+        }
       }
+    } finally {
+      if (mounted) setState(() => _isPicking = false);
     }
   }
 
@@ -144,9 +191,11 @@ class _ConverterPageState extends State<ConverterPage> {
   }
 
   Future<void> _editPage(int index) async {
-    final edited = await showDialog<DocumentPage>(
-      context: context,
-      builder: (_) => _PageEditorDialog(page: _pages[index]),
+    final edited = await Navigator.of(context).push<DocumentPage>(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => PageEditor(page: _pages[index]),
+      ),
     );
     if (edited == null || !mounted) return;
     setState(() {
@@ -156,7 +205,7 @@ class _ConverterPageState extends State<ConverterPage> {
   }
 
   Future<void> _createPdf() async {
-    if (_pages.isEmpty || _isGenerating) return;
+    if (_pages.isEmpty || _isBusy) return;
     final name = await _askForFilename();
     if (name == null || !mounted) return;
 
@@ -264,7 +313,7 @@ class _ConverterPageState extends State<ConverterPage> {
           if (_pages.isNotEmpty)
             IconButton(
               tooltip: 'Clear all',
-              onPressed: _isGenerating
+              onPressed: _isBusy
                   ? null
                   : () => setState(() {
                       _pages.clear();
@@ -282,6 +331,13 @@ class _ConverterPageState extends State<ConverterPage> {
       body: SafeArea(
         child: Column(
           children: [
+            if (_isPicking) ...[
+              const LinearProgressIndicator(),
+              const Padding(
+                padding: EdgeInsets.all(8),
+                child: Text('Opening images…'),
+              ),
+            ],
             _buildIntro(),
             Expanded(
               child: _pages.isEmpty ? _buildEmptyState() : _buildImageList(),
@@ -322,7 +378,7 @@ class _ConverterPageState extends State<ConverterPage> {
                 const SizedBox(height: 8),
                 const Text('Developed by Rey Sagutam'),
                 const SizedBox(height: 4),
-                const Text('Version 1.0.0'),
+                const Text('Version 1.2.0'),
                 const SizedBox(height: 12),
                 const Text(
                   'Convert multiple images into one PDF entirely on your device.',
@@ -379,13 +435,13 @@ class _ConverterPageState extends State<ConverterPage> {
             ),
             const SizedBox(height: 24),
             FilledButton.icon(
-              onPressed: _scanPages,
+              onPressed: _isBusy ? null : _scanPages,
               icon: const Icon(Icons.document_scanner_outlined),
               label: const Text('Scan document'),
             ),
             const SizedBox(height: 10),
             OutlinedButton.icon(
-              onPressed: _selectImages,
+              onPressed: _isBusy ? null : _selectImages,
               icon: const Icon(Icons.photo_library_outlined),
               label: const Text('Choose from gallery'),
             ),
@@ -400,7 +456,7 @@ class _ConverterPageState extends State<ConverterPage> {
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 100),
       buildDefaultDragHandles: false,
       itemCount: _pages.length,
-      onReorderItem: _isGenerating ? (_, _) {} : _reorder,
+      onReorderItem: _isBusy ? (_, _) {} : _reorder,
       proxyDecorator: (child, _, animation) => Material(
         elevation: 6 * animation.value,
         borderRadius: BorderRadius.circular(16),
@@ -421,7 +477,11 @@ class _ConverterPageState extends State<ConverterPage> {
               children: [
                 ClipRRect(
                   borderRadius: BorderRadius.circular(10),
-                  child: _EditedImagePreview(page: page, width: 64, height: 64),
+                  child: SizedBox(
+                    width: 64,
+                    height: 64,
+                    child: DocumentPreview(page: page),
+                  ),
                 ),
                 Positioned(
                   left: -6,
@@ -452,17 +512,17 @@ class _ConverterPageState extends State<ConverterPage> {
               children: [
                 IconButton(
                   tooltip: 'Edit page ${index + 1}',
-                  onPressed: _isGenerating ? null : () => _editPage(index),
+                  onPressed: _isBusy ? null : () => _editPage(index),
                   icon: const Icon(Icons.tune),
                 ),
                 IconButton(
                   tooltip: 'Remove page ${index + 1}',
-                  onPressed: _isGenerating ? null : () => _remove(index),
+                  onPressed: _isBusy ? null : () => _remove(index),
                   icon: const Icon(Icons.close),
                 ),
                 ReorderableDragStartListener(
                   index: index,
-                  enabled: !_isGenerating,
+                  enabled: !_isBusy,
                   child: const Padding(
                     padding: EdgeInsets.all(12),
                     child: Icon(Icons.drag_handle),
@@ -489,7 +549,7 @@ class _ConverterPageState extends State<ConverterPage> {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: _isGenerating ? null : _showAddPages,
+                    onPressed: _isBusy ? null : _showAddPages,
                     icon: const Icon(Icons.add_outlined),
                     label: const Text('Add pages'),
                   ),
@@ -497,7 +557,7 @@ class _ConverterPageState extends State<ConverterPage> {
                 const SizedBox(width: 12),
                 DropdownButton<PdfImageQuality>(
                   value: _quality,
-                  onChanged: _isGenerating
+                  onChanged: _isBusy
                       ? null
                       : (value) {
                           if (value != null) {
@@ -527,7 +587,7 @@ class _ConverterPageState extends State<ConverterPage> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton.icon(
-                  onPressed: _createPdf,
+                  onPressed: _isBusy ? null : _createPdf,
                   icon: const Icon(Icons.picture_as_pdf_outlined),
                   label: Text('Create ${_pages.length}-page PDF'),
                 ),
@@ -537,7 +597,7 @@ class _ConverterPageState extends State<ConverterPage> {
                 children: [
                   Expanded(
                     child: FilledButton.tonalIcon(
-                      onPressed: _savePdf,
+                      onPressed: _isBusy ? null : _savePdf,
                       icon: const Icon(Icons.download_outlined),
                       label: const Text('Save'),
                     ),
@@ -545,7 +605,7 @@ class _ConverterPageState extends State<ConverterPage> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: _sharePdf,
+                      onPressed: _isBusy ? null : _sharePdf,
                       icon: const Icon(Icons.share_outlined),
                       label: const Text('Share'),
                     ),
@@ -560,198 +620,6 @@ class _ConverterPageState extends State<ConverterPage> {
 }
 
 enum _PageSource { camera, gallery }
-
-class _EditedImagePreview extends StatelessWidget {
-  const _EditedImagePreview({
-    required this.page,
-    required this.width,
-    required this.height,
-  });
-
-  final DocumentPage page;
-  final double width;
-  final double height;
-
-  static const _grayscaleMatrix = <double>[
-    0.2126,
-    0.7152,
-    0.0722,
-    0,
-    0,
-    0.2126,
-    0.7152,
-    0.0722,
-    0,
-    0,
-    0.2126,
-    0.7152,
-    0.0722,
-    0,
-    0,
-    0,
-    0,
-    0,
-    1,
-    0,
-  ];
-  static const _highContrastMatrix = <double>[
-    0.3827,
-    1.2874,
-    0.1299,
-    0,
-    -102,
-    0.3827,
-    1.2874,
-    0.1299,
-    0,
-    -102,
-    0.3827,
-    1.2874,
-    0.1299,
-    0,
-    -102,
-    0,
-    0,
-    0,
-    1,
-    0,
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    Widget image = Image.file(
-      File(page.source.path),
-      width: width,
-      height: height,
-      fit: BoxFit.cover,
-      errorBuilder: (_, _, _) => Container(
-        width: width,
-        height: height,
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
-        child: const Icon(Icons.image_not_supported_outlined),
-      ),
-    );
-    final matrix = switch (page.filter) {
-      ScanFilter.original => null,
-      ScanFilter.grayscale => _grayscaleMatrix,
-      ScanFilter.highContrast => _highContrastMatrix,
-    };
-    if (matrix != null) {
-      image = ColorFiltered(
-        colorFilter: ColorFilter.matrix(matrix),
-        child: image,
-      );
-    }
-    return SizedBox(
-      width: width,
-      height: height,
-      child: ClipRect(
-        child: RotatedBox(quarterTurns: page.quarterTurns, child: image),
-      ),
-    );
-  }
-}
-
-class _PageEditorDialog extends StatefulWidget {
-  const _PageEditorDialog({required this.page});
-
-  final DocumentPage page;
-
-  @override
-  State<_PageEditorDialog> createState() => _PageEditorDialogState();
-}
-
-class _PageEditorDialogState extends State<_PageEditorDialog> {
-  late DocumentPage _edited;
-
-  @override
-  void initState() {
-    super.initState();
-    _edited = widget.page;
-  }
-
-  void _rotate(int amount) {
-    setState(() {
-      _edited = _edited.copyWith(
-        quarterTurns: (_edited.quarterTurns + amount + 4) % 4,
-      );
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Edit page'),
-      content: SizedBox(
-        width: 420,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: _EditedImagePreview(
-                page: _edited,
-                width: 420,
-                height: 260,
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                IconButton.filledTonal(
-                  tooltip: 'Rotate left',
-                  onPressed: () => _rotate(-1),
-                  icon: const Icon(Icons.rotate_left),
-                ),
-                const SizedBox(width: 20),
-                IconButton.filledTonal(
-                  tooltip: 'Rotate right',
-                  onPressed: () => _rotate(1),
-                  icon: const Icon(Icons.rotate_right),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                'Document filter',
-                style: Theme.of(context).textTheme.labelLarge,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              alignment: WrapAlignment.center,
-              spacing: 8,
-              children: ScanFilter.values
-                  .map(
-                    (filter) => ChoiceChip(
-                      label: Text(filter.label),
-                      selected: _edited.filter == filter,
-                      onSelected: (_) => setState(
-                        () => _edited = _edited.copyWith(filter: filter),
-                      ),
-                    ),
-                  )
-                  .toList(),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop(_edited),
-          child: const Text('Apply'),
-        ),
-      ],
-    );
-  }
-}
 
 class _FilenameDialog extends StatefulWidget {
   const _FilenameDialog({required this.initialName});

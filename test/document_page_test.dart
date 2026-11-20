@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_pdf_converter/src/document_page.dart';
+import 'package:mobile_pdf_converter/src/page_annotation.dart';
 
 void main() {
   test('copyWith preserves the source and updates page edits', () {
@@ -31,5 +32,24 @@ void main() {
       DocumentPage(source: source).id,
       isNot(DocumentPage(source: source).id),
     );
+  });
+
+  test('page edits preserve annotations without sharing a mutable list', () {
+    final text = TextAnnotation(text: 'Initial text');
+    final annotations = <PageAnnotation>[text];
+    final page = DocumentPage(
+      source: XFile('page.jpg'),
+      annotations: annotations,
+    );
+    annotations.clear();
+
+    final edited = page.copyWith(quarterTurns: 1, filter: ScanFilter.grayscale);
+    expect(edited.annotations, [text]);
+    expect(edited.id, same(page.id));
+    expect(() => page.annotations.clear(), throwsUnsupportedError);
+
+    final deleted = edited.copyWith(annotations: []);
+    expect(deleted.annotations, isEmpty);
+    expect(page.annotations, [text]);
   });
 }
