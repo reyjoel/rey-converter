@@ -10,6 +10,8 @@
 	<string>REY Converter</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Select photos to convert into a PDF on your device.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Capture paper documents to convert into a PDF on your device.</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
